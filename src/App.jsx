@@ -34,17 +34,56 @@ function normalizeAnswerValue(answer) {
   return null;
 }
 
+function formatFhirDate(value) {
+  // For dateTime values (with T), convert to local browser timezone
+  const str = String(value);
+  if (str.includes("T")) {
+    const d = new Date(str);
+    return d.toLocaleDateString("en-US", { year:"numeric", month:"short", day:"numeric" });
+  }
+  // For date-only values, parse manually to avoid UTC timezone shift
+  const match = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) {
+    const d = new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
+    return d.toLocaleDateString("en-US", { year:"numeric", month:"short", day:"numeric" });
+  }
+  return str;
+}
+
 function formatAnswerValue(av) {
   if (!av) return "—";
   const { type, value } = av;
   if (type === "boolean") return value ? "Yes" : "No";
   if (type === "coding") return value.display || value.code || JSON.stringify(value);
   if (type === "quantity") return `${value.value ?? ""}${value.unit ? ` ${value.unit}` : ""}`;
-  if (type === "date" || type === "datetime") {
+  if (type === "date") {
+    try {
+      // Parse date-only strings manually to avoid UTC timezone shift
+      // FHIR date format: YYYY, YYYY-MM, or YYYY-MM-DD
+      const parts = String(value).split("-");
+      if (parts.length === 3) {
+        const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+        return d.toLocaleDateString("en-US", { year:"numeric", month:"long", day:"numeric" });
+      }
+      if (parts.length === 2) return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1).toLocaleDateString("en-US", { year:"numeric", month:"long" });
+      return parts[0]; // year only
+    } catch { return String(value); }
+  }
+  if (type === "datetime") {
     try {
       const d = new Date(value);
-      if (type === "date") return d.toLocaleDateString("en-US", { year:"numeric", month:"long", day:"numeric" });
-      return d.toLocaleString("en-US", { year:"numeric", month:"long", day:"numeric", hour:"2-digit", minute:"2-digit" });
+      return d.toLocaleString("en-US", { year:"numeric", month:"long", day:"numeric", hour:"2-digit", minute:"2-digit", timeZoneName:"short" });
+    } catch { return String(value); }
+  }
+  if (type === "time") {
+    try {
+      // FHIR time format: HH:MM:SS
+      const parts = String(value).split(":");
+      const h = parseInt(parts[0]);
+      const m = parts[1] || "00";
+      const ampm = h >= 12 ? "PM" : "AM";
+      const h12 = h % 12 || 12;
+      return `${h12}:${m} ${ampm}`;
     } catch { return String(value); }
   }
   if (type === "attachment") return value.title || value.url || "(attachment)";
@@ -151,9 +190,30 @@ function ChoiceOptions({ options, selectedCodes, multi }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 2 }}>
       {options.map((opt, i) => {
-        const vc = opt.valueCoding || opt.valueString;
-        const code = typeof vc === "string" ? vc : vc?.code;
-        const display = typeof vc === "string" ? vc : (vc?.display || vc?.code || "?");
+        // Handle all FHIR answerOption value types
+        let code, display;
+        if (opt.valueCoding) {
+          code = opt.valueCoding.code;
+          display = opt.valueCoding.display || opt.valueCoding.code || "?";
+        } else if (opt.valueString !== undefined) {
+          code = opt.valueString;
+          display = opt.valueString;
+        } else if (opt.valueInteger !== undefined) {
+          code = String(opt.valueInteger);
+          display = String(opt.valueInteger);
+        } else if (opt.valueDate !== undefined) {
+          code = opt.valueDate;
+          display = opt.valueDate;
+        } else if (opt.valueTime !== undefined) {
+          code = opt.valueTime;
+          display = opt.valueTime;
+        } else if (opt.valueReference) {
+          code = opt.valueReference.reference || opt.valueReference.display;
+          display = opt.valueReference.display || opt.valueReference.reference || "?";
+        } else {
+          code = String(i);
+          display = JSON.stringify(opt);
+        }
         const selected = selectedCodes.has(code);
         return (
           <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -302,7 +362,9 @@ function MatchedItem({ qItem, answerMap, depth = 0 }) {
     for (const ans of answers) {
       const av = normalizeAnswerValue(ans);
       if (av?.type === "coding") selectedCodes.add(av.value?.code);
-      else if (av?.type === "string") selectedCodes.add(av.value);
+      else if (av?.type === "integer" || av?.type === "decimal") selectedCodes.add(String(av.value));
+      else if (av?.type === "reference") selectedCodes.add(av.value?.reference || av.value?.display);
+      else if (av?.value !== undefined) selectedCodes.add(String(av.value));
     }
   }
 
@@ -390,7 +452,7 @@ function RenderOutput({ questionnaire, questionnaireResponse }) {
           meta={[
             { label: "Mode", value: "Response Only" },
             ...(questionnaireResponse.status ? [{ label: "Status", value: questionnaireResponse.status }] : []),
-            ...(authored ? [{ label: "Authored", value: new Date(authored).toLocaleDateString("en-US", { year:"numeric", month:"short", day:"numeric" }) }] : []),
+            ...(authored ? [{ label: "Authored", value: formatFhirDate(authored) }] : []),
             ...(questionnaireResponse.subject?.display ? [{ label: "Subject", value: questionnaireResponse.subject.display }] : []),
             ...(questionnaireResponse.author?.display ? [{ label: "Author", value: questionnaireResponse.author.display }] : []),
           ]} />
@@ -425,7 +487,7 @@ function RenderOutput({ questionnaire, questionnaireResponse }) {
             meta={[
               { label: "Mode", value: "Response Only" },
               ...(questionnaireResponse.status ? [{ label: "Status", value: questionnaireResponse.status }] : []),
-              ...(authored ? [{ label: "Authored", value: new Date(authored).toLocaleDateString("en-US", { year:"numeric", month:"short", day:"numeric" }) }] : []),
+              ...(authored ? [{ label: "Authored", value: formatFhirDate(authored) }] : []),
               ...(questionnaireResponse.subject?.display ? [{ label: "Subject", value: questionnaireResponse.subject.display }] : []),
             ]} />
           {questionnaireResponse.item?.map((qrItem, i) => <QROnlyItem key={qrItem.linkId || i} qrItem={qrItem} depth={0} />)}
@@ -444,7 +506,7 @@ function RenderOutput({ questionnaire, questionnaireResponse }) {
         meta={[
           { label: "Mode", value: "Completed Form" },
           ...(questionnaireResponse.status ? [{ label: "Status", value: questionnaireResponse.status }] : []),
-          ...(authored ? [{ label: "Authored", value: new Date(authored).toLocaleDateString("en-US", { year:"numeric", month:"short", day:"numeric" }) }] : []),
+          ...(authored ? [{ label: "Authored", value: formatFhirDate(authored) }] : []),
           ...(questionnaireResponse.subject?.display ? [{ label: "Subject", value: questionnaireResponse.subject.display }] : []),
           ...(questionnaireResponse.author?.display ? [{ label: "Author", value: questionnaireResponse.author.display }] : []),
         ]} />
@@ -643,10 +705,10 @@ export default function FHIRViewer() {
         {view === "input" ? (
           <>
             <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
-              <JsonInput label="Questionnaire" value={qText} onChange={(v) => { setQText(v); setQError(null); }}
-                onFileUpload={(v) => { setQText(v); setQError(null); }} error={qError} />
-              <JsonInput label="QuestionnaireResponse" value={qrText} onChange={(v) => { setQRText(v); setQRError(null); }}
-                onFileUpload={(v) => { setQRText(v); setQRError(null); }} error={qrError} />
+              <JsonInput label="Questionnaire" value={qText} onChange={(v) => { setQText(v); setQError(null); setQRError(null); }}
+                onFileUpload={(v) => { setQText(v); setQError(null); setQRError(null); }} error={qError} />
+              <JsonInput label="QuestionnaireResponse" value={qrText} onChange={(v) => { setQRText(v); setQRError(null); setQError(null); }}
+                onFileUpload={(v) => { setQRText(v); setQRError(null); setQError(null); }} error={qrError} />
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <button onClick={handleRender}
